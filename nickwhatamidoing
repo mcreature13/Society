@@ -1,0 +1,149 @@
+# Import necessary libraries for Google Cloud
+from google.cloud import language_v1, storage
+from google.cloud import bigquery
+import random
+import time
+
+# Initialize Google Cloud clients
+language_client = language_v1.LanguageServiceClient()
+storage_client = storage.Client()
+
+# Project and storage settings
+project_id = "upheld-world-435720-s6"  # Your project ID
+bucket_name = "simulationbucket13"  # Your bucket name
+
+# BigQuery settings
+dataset_id = "upheld-world-435720-s6.society_simulation_data"  # Replace with your dataset ID
+table_id = "upheld-world-435720-s6.society_simulation_data.society_simulation_data_table"  # Replace with your table ID
+
+# Simulate a basic society and run it on Google Cloud
+class Citizen:
+    def __init__(self, id, happiness, health, relationships):
+        self.id = id
+        self.happiness = happiness
+        self.health = health
+        self.relationships = relationships
+
+class SocietySimulation:
+    def __init__(self, population_size):100
+        self.population = [Citizen(i, random.uniform(50, 100), random.uniform(50, 100), random.randint(1, 10)) for i in range(population_size)]
+        self.year = 0
+
+    def calculate_happiness(self):
+        # Aggregate happiness
+        total_happiness = sum([citizen.happiness for citizen in self.population])
+        average_happiness = total_happiness / len(self.population)
+        return average_happiness
+
+    def evolve(self):
+        # Simulate one year of changes in health, happiness, and relationships
+        for citizen in self.population:
+            citizen.happiness = max(0, min(100, citizen.happiness + random.uniform(-5, 5)))
+            citizen.health = max(0, min(100, citizen.health + random.uniform(-5, 5)))
+            citizen.relationships = max(1, min(10, citizen.relationships + random.randint(-1, 1)))
+
+    def analyze_text(self, text):
+        # Use Google Cloud Natural Language API to analyze a text input
+        document = language_v1.Document(content=text, type_=language_v1.Document.Type.PLAIN_TEXT)
+        sentiment = language_client.analyze_sentiment(request={"document": document}).document_sentiment
+        return sentiment
+
+    def save_to_cloud_storage(self, data, file_name):
+        # Save simulation data to Google Cloud Storage
+        bucket = storage_client.get_bucket(bucket_name)
+        blob = bucket.blob(file_name)
+        blob.upload_from_string(data)
+        print(f"Data saved to {bucket_name}/{file_name}")
+
+    def run_simulation(self, years):
+        # Run simulation for a set number of years and store results
+        for _ in range(years):
+            self.evolve()
+            average_happiness = self.calculate_happiness()
+
+            # Print yearly status
+            print(f"Year {self.year}: Average Happiness: {average_happiness:.2f}")
+            self.year += 1
+
+            # Save data yearly to Google Cloud Storage
+            data = f"Year {self.year}, Average Happiness: {average_happiness:.2f}\n"
+            self.save_to_cloud_storage(data, f"year_{self.year}_data.txt")
+
+            # Insert data into BigQuery
+            insert_data_to_bigquery(dataset_id, table_id, [{"year": self.year, "average_happiness": average_happiness}])
+
+# Initialize simulation with 2000 citizens for testing
+simulation = SocietySimulation(population_size=2000)
+
+# Run simulation for 5 years as a test
+simulation.run_simulation(years=5)
+
+# BigQuery integration to handle large datasets
+def insert_data_to_bigquery(dataset_id, table_id, rows_to_insert):
+    client = bigquery.Client(project=project_id)
+    table = client.get_table(f"{project_id}.{dataset_id}.{table_id}")
+    errors = client.insert_rows_json(table, rows_to_insert)
+    if errors:
+        print(f"Encountered errors while inserting rows: {errors}")
+    else:
+        print("Rows successfully inserted into BigQuery.")
+
+# BigQuery ML integration
+def create_bigquery_ml_model(dataset_id, table_id, model_name):
+    """Creates a BigQuery ML model for predicting average happiness."""
+    client = bigquery.Client(project=project_id)
+    table_ref = client.dataset(dataset_id).table(table_id)
+
+    # Define the model creation query
+    query = f"""
+        CREATE OR REPLACE MODEL `{project_id}.{dataset_id}.{model_name}`
+        OPTIONS(
+            model_type='LINEAR_REGRESSION',
+            input_label_cols=['year'],
+            data_split_method='AUTO',
+            data_split_eval_fraction=0.2
+        ) AS
+        SELECT
+            year,
+            average_happiness
+        FROM
+            `{project_id}.{dataset_id}.{table_id}`
+    """
+
+    # Execute the query to create the model
+    query_job = client.query(query)
+    query_job.result()  # Wait for the query to complete
+
+    print(f"BigQuery ML model '{model_name}' created successfully.")
+
+# Example of using the BigQuery ML model for prediction
+def predict_happiness(year):
+    """Predicts average happiness for a given year using the BigQuery ML model."""
+    client = bigquery.Client(project=project_id)
+    model_ref = client.dataset(dataset_id).table("happiness_predictor")
+
+    # Define the prediction query
+    query = f"""
+        SELECT
+            *
+        FROM
+            ML.PREDICT(MODEL `{project_id}.{dataset_id}.happiness_predictor`,
+                       (
+                           SELECT {year} AS year
+                       )
+            )
+    """
+
+    # Execute the query to get the prediction
+    query_job = client.query(query)
+    results = query_job.result()
+
+    # Print the prediction
+    for row in results:
+        print(f"Predicted average happiness for year {year}: {row['predicted_average_happiness']:.2f}")
+
+# Create the BigQuery ML model
+create_bigquery_ml_model(dataset_id, table_id, "happiness_predictor")
+
+# Example prediction for year 6
+predict_happiness(6)
